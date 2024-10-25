@@ -1,0 +1,9 @@
+ray[all]
+datasets
+webdataset
+librosa
+numpy
+tqdm
+pydub
+pandas
+descript-audiotools
