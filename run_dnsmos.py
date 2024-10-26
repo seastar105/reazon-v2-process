@@ -4,11 +4,11 @@ import re
 import io
 from audiotools import AudioSignal
 import dnsmos
-from tqdm.auto import tqdm
 import librosa
 import torch
-import argparse
 import pandas as pd
+import ray
+from huggingface_hub import HfApi
 
 
 def decode_audio(key, data):
@@ -25,35 +25,17 @@ def decode_audio(key, data):
     return audio, audio.shape[-1] / 16000
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    
-    parser.add_argument("--num_workers", type=int, default=1)
-    parser.add_argument("--worker_idx", type=int, default=0)
-    parser.add_argument("--num_dataloader_workers", type=int, default=8)
-    parser.add_argument("--device_id", type=int, default=0)
-    parser.add_argument("--output_dir", type=str, default=".")
-    
-    args = parser.parse_args()
-
-    with open("reazon_denoise_v2_urls.txt") as f:
-        urls = [line.strip() for line in f]
-
-    print(f"Total: {len(urls)}")
-    urls = urls[args.worker_idx::args.num_workers]
-    assert len(urls) >= args.num_dataloader_workers, f"Worker {args.worker_idx} has less than {args.num_dataloader_workers} urls"
-    print(f"Worker: {args.worker_idx}, Total: {len(urls)}")
+@ray.remote(num_cpus=4, num_gpus=0.5, max_retries=5)
+def compute_scores(urls, output_dir):
     hf_token = "<HF_TOKEN>"
     urls = [f"pipe:curl -s -L {url} -H 'Authorization:Bearer {hf_token}'" for url in urls]
 
     ds = wds.WebDataset(urls).decode(decode_audio).to_tuple("__key__", "flac")
-    dl = torch.utils.data.DataLoader(ds, batch_size=None, num_workers=args.num_dataloader_workers, drop_last=False)
-
-    compute = dnsmos.ComputeScore("sig_bak_ovr.onnx", "cuda", args.device_id)
+    dl = torch.utils.data.DataLoader(ds, batch_size=None, num_workers=4, drop_last=False)
+    
+    compute = dnsmos.ComputeScore("sig_bak_ovr.onnx", "cuda")
     results = []
-    score_dict = dict()
-    scores = []
-    for key, (audio, duration) in tqdm(dl):
+    for key, (audio, duration) in dl:
         score = float(compute(audio, 16000, False)["OVRL"])
         results.append(
             {
@@ -62,20 +44,41 @@ if __name__ == "__main__":
                 "duration": duration,
             }
         )
-        score_dict[key] = (score, duration)
-        scores.append(score)
 
-    Path(args.output_dir).mkdir(parents=True, exist_ok=True)
-    output_tsv_path = f"{args.output_dir}/reazon_denoise_v2_scores_{args.worker_idx}.tsv"
+    names = [url.split("/")[-1].split(".")[0] for url in urls]
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    output_name = "".join(names) + ".tsv"
+    output_tsv_path = f"{output_dir}/{output_name}"
     df = pd.DataFrame(results)
     df.to_csv(output_tsv_path, sep="\t", index=False)
-    print(f"Saved to {output_tsv_path}")
     # upload to huggingface
-    from huggingface_hub import HfApi
+    
     api = HfApi(token=hf_token)
     api.upload_file(
         path_or_fileobj=output_tsv_path,
-        path_in_repo=f"reazon_denoise_v2_scores_{args.worker_idx}.tsv",
+        path_in_repo=f"dnsmos/{output_name}",
+        repo_id="seastar105/denoised-reazonspeech-v2-dnsmos",
+        repo_type="dataset",
+    )
+    return df
+
+
+if __name__ == "__main__":
+    with open("reazon_denoise_v2_urls.txt", "r") as f:
+        urls = [line.strip() for line in f]
+
+    ray.init()
+    chunk_size = 4
+    url_chunks = [urls[i : i + chunk_size] for i in range(0, len(urls), chunk_size)]
+    refs = [compute_scores.remote(urls, "./") for urls in url_chunks]
+    df_list = ray.get(refs)
+    df = pd.concat(df_list)
+    df.to_csv("all_dnsmos.tsv", sep="\t", index=False)
+    hf_token = "<HF_TOKEN>"
+    api = HfApi(token=hf_token)
+    api.upload_file(
+        path_or_fileobj="all_dnsmos.tsv",
+        path_in_repo="all_dnsmos.tsv",
         repo_id="seastar105/denoised-reazonspeech-v2-dnsmos",
         repo_type="dataset",
     )

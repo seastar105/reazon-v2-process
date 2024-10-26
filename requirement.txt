@@ -1,5 +1,4 @@
 ray[all]
-datasets
 webdataset
 librosa
 numpy
@@ -7,3 +6,5 @@ tqdm
 pydub
 pandas
 descript-audiotools
+huggingface_hub[hf_transfer]
+gpustat

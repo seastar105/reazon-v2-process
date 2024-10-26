@@ -29,7 +29,7 @@ class ComputeScore:
     ComputeScore class for evaluating DNSMOS.
     """
 
-    def __init__(self, primary_model_path, device="cpu", device_id=0) -> None:
+    def __init__(self, primary_model_path, device="cpu") -> None:
         """
         Initialize the ComputeScore object.
 
@@ -45,9 +45,7 @@ class ComputeScore:
         """
         if device == "cuda":
             self.onnx_sess = ort.InferenceSession(
-                primary_model_path, providers=[
-                    ("CUDAExecutionProvider", {"device_id": device_id})
-                ]
+                primary_model_path, providers=["CUDAExecutionProvider"]
             )
             print("Using CUDA:", self.onnx_sess.get_providers())
         else:
